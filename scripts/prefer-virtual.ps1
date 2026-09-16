@@ -29,7 +29,13 @@ if (-not $physical -or -not ($displays | Where-Object Name -eq $physical)) {
     $physical = ($displays | Where-Object { -not $_.Virtual } | Select-Object -First 1).Name
 }
 
-if (-not $physical) { '  The physical monitor is not attached. Switch it on first.'; exit 1 }
+if (-not $physical) {
+    # With no monitor attached, the virtual display is the whole desktop - and so
+    # already primary. That is the goal when streaming with the monitor off, not a
+    # failure; only handing the display BACK needs a monitor to hand it to.
+    if (-not $Restore -and $virtual) { "  primary -> $virtual  (the only display attached)"; exit 0 }
+    '  The physical monitor is not attached. Switch it on first.'; exit 1
+}
 if (-not $virtual) {
     # Handing the display back needs only the monitor: with no virtual display
     # attached - parked, or gone - the monitor is already the desktop.

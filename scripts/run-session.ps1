@@ -25,6 +25,13 @@ $kit  = Split-Path $here -Parent
 $logs = Join-Path $kit 'logs'
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 $logFile  = Join-Path $logs 'session.log'
+# Everything the shared code says goes to the console AND the log: with the
+# monitor off, the console cannot be read, so the log is the only record.
+Set-KitLogger {
+    param($m)
+    $m
+    try { Add-Content -Path (Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) 'logs') 'session.log') -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), "$m".Trim()) } catch { }
+}
 $flagFile = Join-Path $kit 'config\session-active.json'
 
 function Exit-Early([string]$why) {
@@ -82,12 +89,18 @@ Start-Process powershell -WindowStyle Hidden -ArgumentList $guardArgs
 
 # --- 5. start Bigscreen -------------------------------------------------------------------
 '  [4/5] Starting Bigscreen.'
-$started = Get-Date
-Start-BigscreenApp $app
+if (-not (Start-BigscreenApp $app)) { Exit-Early 'Bigscreen did not start.' }
 ''
-'        Connect from the headset now.'
+'        Connect from the headset now. You can switch the monitor off first -'
+'        the session follows it either way.'
 ''
-if (-not (Wait-ForHeadset $app $started)) { Exit-Early 'Bigscreen closed before the headset connected.' }
+# Waiting for the headset is the one window where a display change used to go
+# unnoticed, and switching the monitor off before putting the headset on is a
+# normal way to work. So the wait keeps the capture right while it waits.
+if (-not (Wait-ForHeadsetConnecting -App $app -Height $Height -Mbps $Mbps -Fps $Fps `
+            -VirtualAdapter $VirtualAdapter -OnMonitorReturn $OnMonitorReturn)) {
+    Exit-Early 'Bigscreen closed before the headset connected.'
+}
 
 # --- 6. apply the profile -----------------------------------------------------------------
 if ($Height -gt 0) {

@@ -17,8 +17,8 @@ A setup menu detects your hardware, recommends settings for what you are doing, 
 | Switching the monitor off kills the stream | Bigscreen captures whichever display is **primary when it starts**. If that is the monitor, switching it off removes the capture source. | Makes the virtual display primary **before** Bigscreen starts, so the stream is bound to a display that never disappears. |
 | The headset's quality menu stops at 1080p | That limit is only in the headset menu. The PC app accepts up to 4320 lines, 100 Mbps and 300 fps. | Starts Bigscreen with its debugger open on `127.0.0.1` and sets resolution, bitrate and frame rate directly. |
 | The stream freezes or drops under load | One GPU is rendering a game **and** encoding the stream. At full load the encoder is starved. Some settings also exceed what headset decoders accept. | Recommends settings for your hardware and activity, warns when a profile is more than your system can carry, and measures real GPU headroom. |
-| Ending a session crashes Bigscreen and resets the GPU | Changing displays under a live stream, or killing Bigscreen with its encoder active, can hang the GPU's video engine (Event Viewer: *LiveKernelEvent 141*). | **R** tears the stream down first, then closes Bigscreen, then hands the display back — and checks the Windows logs for a GPU reset. |
-| Switching the monitor off mid-session stops the picture | Bigscreen creates a screen capture for **every** monitor on the GPU when it starts. A monitor that leaves the desktop takes its capture with it, and the capture cannot be rebuilt — so the stream can stop even though the headset was watching the virtual display. | Watches the attached displays and **restarts Bigscreen** whenever they change, so it captures what is there now. The headset reconnects by itself and the profile is re-applied. |
+| Ending a session badly crashes Bigscreen | Changing displays under a live stream crashed Bigscreen in testing, and a crash is the moment a GPU driver is most likely to reset. | **R** tears the stream down first, then closes Bigscreen, then hands the display back — and checks Windows for a GPU reset, by when it happened rather than when it was reported (see [Troubleshooting](#troubleshooting)). |
+| Switching the monitor off mid-session stops the picture | Bigscreen creates a screen capture for **every** monitor on the GPU when it starts. A monitor that leaves the desktop takes its capture with it, and the capture cannot be rebuilt — so the stream can stop even though the headset was watching the virtual display. | Compares what Bigscreen is capturing with what is attached, and **restarts Bigscreen** whenever they differ, so it captures what is there now. The headset reconnects by itself and the profile is re-applied. |
 | The monitor is off when the session ends | Windows cannot make a detached monitor primary. | A small hidden helper waits and makes the monitor primary as soon as you switch it on. |
 | The desktop gets stranded on the virtual display — sometimes needing Safe Mode to recover | A virtual display left attached becomes the only screen when Windows switches an idle DisplayPort monitor off, and nothing is running to switch back. | The virtual display is **parked** (detached, still installed) whenever the kit is not running — and if a session dies without cleaning up, a local helper hands the desktop back as soon as a monitor returns. |
 
@@ -135,18 +135,30 @@ Found monitor: \\.\DISPLAY5.   1920 x 1080.   0, 1920, 0, 1080.     <- virtual d
 Found monitor: \\.\DISPLAY1.   1920 x 1080.  -1920, 0, 0, 1080.     <- your monitor
 ```
 
-When a DisplayPort monitor is switched off it leaves the desktop entirely, and that capture cannot be rebuilt — Bigscreen's own log says `Failed to recreate duplication object`, and the capture thread can stop. The stream then dies even though you were watching the virtual display.
+When a DisplayPort monitor is switched off it leaves the desktop entirely, and that capture cannot be rebuilt. Bigscreen keeps trying, once a second, for as long as the monitor is away:
 
-So the session watches the set of attached displays, and when it changes it rebuilds around it:
+```
+Failed to recreate duplication object: -2147467259
+Failed to recreate duplication object: -2147467259
+...
+```
+
+The headset gets a blank or frozen picture until the monitor comes back — even though you were watching the virtual display.
+
+So the kit checks the one fact that matters: **does the list of monitors Bigscreen is capturing match the monitors actually attached?** It reads that list from Bigscreen's own log. When the two differ, the capture is broken, and Bigscreen is rebuilt around the displays that exist now:
 
 | What you do | What the kit does | What you see in the headset |
 |---|---|---|
 | Switch the monitor **off** | Closes Bigscreen (stream torn down first), makes the virtual display primary, starts Bigscreen again — now capturing one display | The picture returns on its own after a few seconds |
 | Switch the monitor **on** | Same again, and hands the desktop back to the monitor (`ON_MONITOR_RETURN=monitor`) | The picture returns, showing the monitor's desktop |
 
-A change has to hold for **5 seconds** before anything happens, restarts are at least **30 seconds** apart, and after **5** in one session the kit stops restarting and says so. A monitor waking up, or a quick flick of the switch, changes nothing.
+Checking the match, rather than watching for a *change*, is what makes this reliable. A change can happen while nothing is looking — the monitor dropping out in the second the headset connects, which is exactly how a blank picture first got past an earlier version — but a mismatch stays true until it is fixed. It is checked while waiting for the headset, when the session watcher starts, and every two seconds after that. You can switch the monitor off before or after connecting; it makes no difference.
 
-Every restart follows the same order as the shutdown — stream down, Bigscreen closed, *then* displays changed — because changing displays under a live stream is what hung the GPU's video engine in testing.
+A mismatch has to hold for **2 seconds** before anything happens, restarts are at least **15 seconds** apart, and after **6** in one session the kit stops restarting and says so.
+
+A restart waits for the old Bigscreen process to be completely gone before starting the new one, and confirms the new one really started. Bigscreen refuses to run twice, so starting it a moment too early does nothing at all — and leaves the session with no app. Bigscreen's log is copied to `logsigscreen-<time>-before-restart.txt` first, because each launch overwrites it.
+
+Every restart follows the same order as the shutdown — stream down, Bigscreen closed, *then* displays changed — because changing displays under a live stream crashed Bigscreen in testing.
 
 ### The guardian
 
@@ -281,7 +293,9 @@ Turning hardware acceleration off moves that work onto the CPU, so it costs perf
 
 **The stream drops under load.** Run the headroom check with the activity running. If it says **tight** or **no headroom**, lower the game's render resolution or frame cap, or use a lighter profile.
 
-**GPU resets when unrelated programs crash.** On some GPU drivers any program that dies abruptly while using the GPU can trigger a reset, taking the stream with it. Event Viewer → *Windows Logs → Application* shows which program crashed just before the *LiveKernelEvent 141*.
+**"GPU RESET" in Event Viewer that does not line up with anything.** Windows Error Reporting re-files the same old GPU reports again and again — on the test machine about a hundred times each, some years old, often in a burst just after a reboot. So a *LiveKernelEvent 141* entry's time is when it was *reported*, not when the GPU reset. Each report names its dump file, and the name carries the real moment: `WATCHDOG-20260916-0948.dmp`. The kit's shutdown check uses that, not the report time.
+
+**Bigscreen does not start, with no error and nothing in its log.** Something has set `ELECTRON_RUN_AS_NODE=1` in the environment you launched from — VS Code does this for processes it starts, including tasks and terminals it hosts. It makes any Electron app, Bigscreen included, exit instantly and silently. The kit clears it before starting Bigscreen; if you start Bigscreen yourself from such a terminal, run it from the Start menu instead.
 
 **A window is black or frozen in the headset but fine on the monitor.** Hardware acceleration in that program — see [What the kit cannot fix](#what-the-kit-cannot-fix), which lists the settings to turn off.
 

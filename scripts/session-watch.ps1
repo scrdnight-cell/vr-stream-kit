@@ -30,14 +30,19 @@ param(
 . (Join-Path $PSScriptRoot 'display.ps1')
 . (Join-Path $PSScriptRoot 'bigscreen.ps1')
 
-# How the display-change rule is kept calm. A monitor waking up, a resolution
-# change or a quick flick of the power switch must not start a restart storm:
-#   DwellSeconds     the new layout has to still be there this long
+# WHAT TRIGGERS A RESTART. Not "the displays changed" - that misses a change made
+# while nothing was watching, and the session then runs on a capture that is
+# already wrong. The trigger is the fact itself: Bigscreen's own log says which
+# monitors it built a capture for, and if that no longer matches what is attached,
+# the capture is broken and only a restart fixes it.
+#
+# Kept calm by:
+#   SettleSeconds    the mismatch has to still be true this long (displays settle)
 #   CooldownSeconds  no second restart until this long after the last one
 #   MaxRestarts      after this many, stop restarting and say so
-$DwellSeconds    = 5
-$CooldownSeconds = 30
-$MaxRestarts     = 5
+$SettleSeconds   = 2
+$CooldownSeconds = 15
+$MaxRestarts     = 6
 
 New-Item -ItemType Directory -Force -Path (Split-Path $LogFile -Parent) | Out-Null
 $here = $PSScriptRoot
@@ -47,6 +52,9 @@ function Say($m) {
     $line
     try { Add-Content -Path $LogFile -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-dd'), $line.Trim()) } catch { }
 }
+# The shared start/stop/restart code reports through here, so a restart is
+# recorded step by step even with the monitor off.
+Set-KitLogger { param($m) Say "$m" }
 
 Say "---- session started ($Height lines, $Mbps Mbps, $Fps fps) ----"
 Say 'Press R in this window to end the session.'
@@ -55,12 +63,16 @@ $seen = @(Get-Content $app.Log -EA SilentlyContinue).Count
 $downSince = $null
 $reason = $null
 
-$signature   = Get-DisplaySetSignature
-$pendingSig  = $null       # a change seen, waiting out the dwell
-$pendingAt   = $null
-$lastRestart = [datetime]::MinValue
-$restarts    = 0
-$capped      = $false
+$mismatchSince = $null     # when the capture first stopped matching the displays
+$lastRestart   = [datetime]::MinValue
+$restarts      = 0
+$capped        = $false
+
+# Check once at startup: a monitor switched off while the headset was connecting
+# leaves a wrong capture that never "changes" again.
+$m0 = Test-CaptureMatchesDisplays $app $VirtualAdapter
+if ($m0.Known -and -not $m0.Match) { Say "Bigscreen is capturing $($m0.Captured -join ', ') but $($m0.Attached -join ', ') is attached." }
+elseif ($m0.Known) { Say "Capturing $($m0.Captured -join ', ')." }
 
 while (-not $reason) {
     Start-Sleep -Seconds 2
@@ -70,18 +82,20 @@ while (-not $reason) {
 
     if (-not (Get-Process BigscreenRemoteDesktop -EA SilentlyContinue)) { $reason = 'Bigscreen is no longer running'; break }
 
-    # --- has the set of attached displays changed? ------------------------------------
-    $now = Get-DisplaySetSignature
-    if ($now -and $now -ne $signature) {
-        if ($now -ne $pendingSig) { $pendingSig = $now; $pendingAt = Get-Date }      # start the dwell
-        elseif (((Get-Date) - $pendingAt).TotalSeconds -ge $DwellSeconds) {
-            $signature = $now; $pendingSig = $null
+    # --- does Bigscreen's capture still match the displays that exist? ------------------
+    $m = Test-CaptureMatchesDisplays $app $VirtualAdapter
+    if ($m.Known -and -not $m.Match) {
+        if (-not $mismatchSince) { $mismatchSince = Get-Date }
+        elseif (((Get-Date) - $mismatchSince).TotalSeconds -ge $SettleSeconds) {
+            $mismatchSince = $null
             $physical = @(Get-AttachedDisplays $VirtualAdapter | Where-Object { -not $_.Virtual })
             $what = if ($physical.Count) { 'A monitor is back' } else { 'The monitor is gone' }
+            Say "$what - capturing $($m.Captured -join ', '), attached $($m.Attached -join ', ')."
 
             if ($capped) { }
             elseif (((Get-Date) - $lastRestart).TotalSeconds -lt $CooldownSeconds) {
-                Say "$what - too soon after the last restart, leaving the stream as it is."
+                Say '  too soon after the last restart - waiting.'
+                $mismatchSince = (Get-Date).AddSeconds(-$SettleSeconds)   # try again next loop
             }
             else {
                 $restarts++
@@ -90,22 +104,23 @@ while (-not $reason) {
                     Say 'The displays keep changing - not restarting again. Press R to end the session.'
                 } else {
                     $goal = if ($physical.Count -and $OnMonitorReturn -eq 'monitor') { 'monitor primary' } else { 'the virtual display' }
-                    Say "$what - restarting Bigscreen on $goal (restart $restarts of $MaxRestarts)."
+                    Say "Restarting Bigscreen on $goal (restart $restarts of $MaxRestarts)."
+                    $kept = Save-BigscreenLog $app (Split-Path $LogFile -Parent) 'before-restart'
+                    if ($kept) { Say "  kept Bigscreen's log as $(Split-Path $kept -Leaf)" }
                     $downSince = $null                     # a deliberate restart is not a lost headset
                     $r = Restart-BigscreenFollowingDisplays -App $app -Height $Height -Mbps $Mbps -Fps $Fps `
                             -VirtualAdapter $VirtualAdapter -OnMonitorReturn $OnMonitorReturn
-                    foreach ($s in $r.Steps) { Say $s }
                     $lastRestart = Get-Date
                     $downSince = $null
-                    $signature = Get-DisplaySetSignature   # the restart may have moved things itself
                     $seen = @(Get-Content $app.Log -EA SilentlyContinue).Count   # fresh log, fresh start
-                    if ($r.Ok) { Say "Streaming again, primary is $($r.Primary)." }
+                    $after = Test-CaptureMatchesDisplays $app $VirtualAdapter
+                    if ($r.Ok) { Say "Streaming again, primary is $($r.Primary), capturing $($after.Captured -join ', ')." }
                     else { Say 'The stream did not come back. Press R to end the session, or connect from the headset again.' }
                     continue
                 }
             }
         }
-    } elseif ($pendingSig) { $pendingSig = $null }        # it went back to what it was
+    } elseif ($mismatchSince) { $mismatchSince = $null }
 
     # --- what Bigscreen is reporting --------------------------------------------------
     $lines = @(Get-Content $app.Log -EA SilentlyContinue)
@@ -167,11 +182,20 @@ if ($LASTEXITCODE -eq 0) {
     Say 'Monitor not attached - left with the guardian, which is waiting for it.'
 }
 
-# 3. Did the shutdown reset the GPU? Checked, not assumed.
+# 3. Did the shutdown reset the GPU? Checked, not assumed - and checked by WHEN
+#    THE RESET HAPPENED, not when Windows reported it. Windows Error Reporting
+#    re-submits the same old GPU dumps over and over (on this test machine, about
+#    100 times each, dumps going back years), often in a burst after a reboot.
+#    Counting report times would call any such burst a new reset. Each report
+#    names its dump file, and the file name carries the moment of the event:
+#    WATCHDOG-20260916-0948.dmp. Only a dump from after the shutdown began counts.
 Start-Sleep -Seconds 4
+$sinceStamp = $shutdownAt.AddMinutes(-1).ToString('yyyyMMddHHmm')
 $reset = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Windows Error Reporting'; StartTime = $shutdownAt } -EA SilentlyContinue |
-           Where-Object { $_.Message -match 'LiveKernelEvent' -and $_.Message -match 'P1:\s*141' })
-$gpu = if ($reset.Count) { "GPU RESET at $($reset[-1].TimeCreated.ToString('HH:mm:ss'))" } else { 'no GPU reset' }
+           Where-Object { $_.Message -match 'LiveKernelEvent' -and $_.Message -match 'P1:\s*141' -and $_.Message -match '-(\d{8})-(\d{4})\.dmp' } |
+           ForEach-Object { if ($_.Message -match '-(\d{8})-(\d{4})\.dmp') { "$($matches[1])$($matches[2])" } } |
+           Where-Object { $_ -ge $sinceStamp } | Sort-Object -Unique)
+$gpu = if ($reset.Count) { "GPU RESET at $($reset[-1].Substring(8,2)):$($reset[-1].Substring(10,2))" } else { 'no GPU reset' }
 
 $ok = $closed -and -not $reset.Count -and -not $parkFailed
 $verdict = if ($ok) { 'SHUTDOWN COMPLETE' } else { 'SHUTDOWN FINISHED WITH PROBLEMS' }
