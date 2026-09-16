@@ -73,6 +73,7 @@ $awaitingSince = $null     # a restart is waiting for the headset; when it was d
 $lastRestart   = [datetime]::MinValue
 $restarts      = 0
 $capped        = $false
+$cooldownNoted = $false    # said once per wait, not once a second
 
 # Check once at startup: a monitor switched off while the headset was connecting
 # leaves a wrong capture that never "changes" again.
@@ -96,15 +97,34 @@ while (-not $reason) {
             $detectedAt = $mismatchSince
             $mismatchSince = $null
             $physical = @(Get-AttachedDisplays $VirtualAdapter | Where-Object { -not $_.Virtual })
-            $what = if ($physical.Count) { 'A monitor is back' } else { 'The monitor is gone' }
-            Say "$what - capturing $($m.Captured -join ', '), attached $($m.Attached -join ', ')."
+            # Say what actually changed, from the difference between the two lists -
+            # not from whether a monitor happens to be attached.
+            $virtualNow = (Get-AttachedDisplays $VirtualAdapter | Where-Object Virtual | Select-Object -First 1).Name
+            $gone  = @($m.Captured | Where-Object { $_ -notin $m.Attached })
+            $added = @($m.Attached | Where-Object { $_ -notin $m.Captured })
+            $what = if ($gone.Count) {
+                        if (-not $virtualNow -and $physical.Count) { 'The virtual display is gone' } else { 'The monitor is gone' }
+                    } elseif ($added.Count) {
+                        if ($virtualNow -and $added -contains $virtualNow) { 'The virtual display is back' } else { 'A monitor is back' }
+                    } else { 'The displays changed' }
+            $sinceLast = ((Get-Date) - $lastRestart).TotalSeconds
+            $inCooldown = $sinceLast -lt $CooldownSeconds
+            # One line per event: while waiting out the gap between restarts this
+            # branch runs every second, and the log should say it once, not fifteen times.
+            if (-not $capped -and -not ($inCooldown -and $cooldownNoted)) {
+                Say "$what - capturing $($m.Captured -join ', '), attached $($m.Attached -join ', ')."
+            }
 
             if ($capped) { }
-            elseif (((Get-Date) - $lastRestart).TotalSeconds -lt $CooldownSeconds) {
-                Say '  too soon after the last restart - waiting.'
+            elseif ($inCooldown) {
+                if (-not $cooldownNoted) {
+                    Say ("  too soon after the last restart - restarting in {0:N0} s if it has not settled back." -f ($CooldownSeconds - $sinceLast))
+                    $cooldownNoted = $true
+                }
                 $mismatchSince = (Get-Date).AddSeconds(-$SettleSeconds)   # try again next loop
             }
             else {
+                $cooldownNoted = $false
                 $restarts++
                 if ($restarts -gt $MaxRestarts) {
                     $capped = $true
@@ -132,7 +152,7 @@ while (-not $reason) {
                 }
             }
         }
-    } elseif ($mismatchSince) { $mismatchSince = $null }
+    } else { $mismatchSince = $null; $cooldownNoted = $false }
 
     # --- what Bigscreen is reporting --------------------------------------------------
     $lines = @(Get-Content $app.Log -EA SilentlyContinue)
@@ -154,8 +174,17 @@ while (-not $reason) {
             Say "  $(Set-StreamProfileWhenReady $Height $Mbps $Fps)"
         }
         if ($l -like '*DTLS connected*' -and $awaitingSince) {
-            # Measured, so a change in restart speed shows up in the log, not just in a claim.
-            Say ("Streaming again - {0:N0} s from the display change being detected." -f ((Get-Date) - $awaitingSince).TotalSeconds)
+            # Measured, so a change in restart speed shows up in the log, not just in a
+            # claim - and only called "streaming again" if the capture still matches.
+            # If the displays changed again while the headset was reconnecting, the
+            # stream is about to be rebuilt once more, and the log should say so.
+            $secs = ((Get-Date) - $awaitingSince).TotalSeconds
+            $check = Test-CaptureMatchesDisplays $app $VirtualAdapter
+            if ($check.Known -and -not $check.Match) {
+                Say ("Headset back after {0:N0} s, but the displays changed again meanwhile - another restart follows." -f $secs)
+            } else {
+                Say ("Streaming again - {0:N0} s from the display change being detected." -f $secs)
+            }
             $awaitingSince = $null
         }
     }

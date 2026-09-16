@@ -1,10 +1,16 @@
-# Close Bigscreen without leaving its hardware encoder hanging.
+# Close Bigscreen with its stream shut down first.
 #
-# WHY. When Bigscreen dies with a live stream - a crash or a plain force-close -
-# some GPU drivers leave the video engine hung, and Windows resets the graphics
-# card about 1.5 s later (Event Viewer: "LiveKernelEvent 141"). What prevents it
-# is order: tear the stream down first, let the encoder release, THEN end the
-# process. A force-close after teardown did not reset the GPU in testing.
+# WHY. Changing displays under a live stream, or killing Bigscreen in the middle
+# of one, crashed it in testing. So the order is: tear the stream down through
+# Bigscreen's own functions, let the encoder release, THEN end the process.
+#
+# A correction, kept here because the old wording is in the history: this comment
+# used to say a force-close makes Windows reset the graphics card about 1.5 s
+# later ("LiveKernelEvent 141"). Measured later, that was wrong. Whenever any
+# program crashes, Windows re-files the same queue of OLD GPU reports - on the
+# test machine, 12 reports dated Dec 2024 to the day before - and those were read
+# as new resets. Not one was from the sessions. Tearing down first is still the
+# clean way to stop; it is not a guard against resets.
 #
 # "Let the encoder release" used to be a flat 3 s pause. It now waits for the
 # teardown to report itself finished - Bigscreen logs "Shutting down remote
@@ -15,7 +21,7 @@
 # asked to close, so after teardown it is ended directly.
 #
 # Without the debugger (Bigscreen not started by this kit) the stream cannot be
-# torn down first, and closing it may reset the GPU - this says so.
+# torn down first - this says so.
 
 param([int]$SettleSeconds = 3)
 

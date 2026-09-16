@@ -61,9 +61,18 @@ while ($true) {
                      Sort-Object TimeCreated)) {
         if ($ev.ProviderName -eq 'Application Error') {
             Emit ("CRASH {0} ({1})" -f [regex]::Match($ev.Message, 'Faulting application name:\s*([^,]+)').Groups[1].Value, [regex]::Match($ev.Message, 'Exception code:\s*(\S+)').Groups[1].Value)
-        } elseif (-not $resetSaid -or ($ev.TimeCreated - $resetSaid).TotalSeconds -gt 30) {
-            $resetSaid = $ev.TimeCreated
-            Emit ("GPU RESET at {0} - app 3D {1:N0}%, encoder {2:N0}%" -f $ev.TimeCreated.ToString('HH:mm:ss'), $row.app3d, $row.enc)
+        } else {
+            # Windows re-files the SAME old GPU reports whenever any program crashes -
+            # measured on the test machine: 12 reports dated Dec 2024 to the day before,
+            # 1-5 s after every crash. By report time each crash looks like a reset.
+            # Only a report whose dump is from now counts, and the dump's file name
+            # carries the real moment: WATCHDOG-20260916-0948.dmp.
+            $dm = [regex]::Match($ev.Message, '-(\d{8})-(\d{4})\.dmp')
+            if (-not $dm.Success) { continue }
+            $stamp = $dm.Groups[1].Value + $dm.Groups[2].Value
+            if ($stamp -lt $lastEvents.AddMinutes(-2).ToString('yyyyMMddHHmm') -or $stamp -eq $resetSaid) { continue }
+            $resetSaid = $stamp
+            Emit ("GPU RESET at {0}:{1} - app 3D {2:N0}%, encoder {3:N0}%" -f $stamp.Substring(8,2), $stamp.Substring(10,2), $row.app3d, $row.enc)
         }
     }
     $lastEvents = $now
