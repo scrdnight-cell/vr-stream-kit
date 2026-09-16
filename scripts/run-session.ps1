@@ -85,7 +85,21 @@ New-Item -ItemType Directory -Force -Path (Split-Path $flagFile -Parent) | Out-N
 $guardArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $here 'display-guardian.ps1'),
                '-OwnerPid', $PID, '-VirtualAdapter', $VirtualAdapter, '-LogFile', $logFile, '-FlagFile', $flagFile)
 if ($KeepVirtualDisplay) { $guardArgs += '-KeepVirtualDisplay' }   # switches passed only when on
-Start-Process powershell -WindowStyle Hidden -ArgumentList $guardArgs
+# QUOTE EVERY ARGUMENT. Start-Process joins an argument array with plain spaces and
+# no quoting, so "Virtual Display Driver" arrived as three words: the guardian
+# failed to bind its parameters and exited the moment it started, leaving every
+# session with no safety net. A kit folder with a space in its path breaks the
+# same way. Unlike the & calls elsewhere, Start-Process needs this done by hand.
+$guardLine = ($guardArgs | ForEach-Object { $a = "$_"; if ($a -match '[\s"]') { '"' + ($a -replace '"', '\"') + '"' } else { $a } }) -join ' '
+$guardian = Start-Process powershell -WindowStyle Hidden -ArgumentList $guardLine -PassThru
+# Checked, not assumed: a guardian that dies on arrival is the failure that went
+# unnoticed. It has nothing to do yet, so if it has already exited, it failed.
+Start-Sleep -Seconds 2
+if ($guardian.HasExited) {
+    $msg = "  WARNING: the safety-net guardian did not stay running (exit $($guardian.ExitCode)). If this window is closed, the display will not be handed back automatically - use R."
+    $msg
+    try { Add-Content -Path $logFile -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg.Trim()) } catch { }
+}
 
 # --- 5. start Bigscreen -------------------------------------------------------------------
 '  [4/5] Starting Bigscreen.'
