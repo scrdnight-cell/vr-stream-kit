@@ -152,9 +152,13 @@ So the kit checks the one fact that matters: **does the list of monitors Bigscre
 | Switch the monitor **off** | Closes Bigscreen (stream torn down first), makes the virtual display primary, starts Bigscreen again — now capturing one display | The picture returns on its own after a few seconds |
 | Switch the monitor **on** | Same again, and hands the desktop back to the monitor (`ON_MONITOR_RETURN=monitor`) | The picture returns, showing the monitor's desktop |
 
-Checking the match, rather than watching for a *change*, is what makes this reliable. A change can happen while nothing is looking — the monitor dropping out in the second the headset connects, which is exactly how a blank picture first got past an earlier version — but a mismatch stays true until it is fixed. It is checked while waiting for the headset, when the session watcher starts, and every two seconds after that. You can switch the monitor off before or after connecting; it makes no difference.
+Checking the match, rather than watching for a *change*, is what makes this reliable. A change can happen while nothing is looking — the monitor dropping out in the second the headset connects, which is exactly how a blank picture first got past an earlier version — but a mismatch stays true until it is fixed. It is checked while waiting for the headset, when the session watcher starts, and every second after that. You can switch the monitor off before or after connecting; it makes no difference.
 
-A mismatch has to hold for **2 seconds** before anything happens, restarts are at least **15 seconds** apart, and after **6** in one session the kit stops restarting and says so.
+A mismatch has to hold for **1 second** before anything happens, restarts are at least **15 seconds** apart, and after **6** in one session the kit stops restarting and says so.
+
+**How long a restart takes.** Measured on the test system, from the display change being detected to a tuned stream: **13–22 seconds**, typically about 16. Most of that is the headset noticing Bigscreen has come back, which the PC cannot speed up. The kit's own part is short: it waits for Bigscreen to report its stream torn down rather than pausing a fixed time, switches the primary display as soon as the change holds, and applies the profile the moment the new connection accepts it. Each restart writes its time to `logs\session.log` as `Streaming again - N s from the display change being detected.`
+
+**R works during a restart.** The kit does not sit waiting for the headset to reconnect: the session carries on watching the keyboard and the displays the whole time, so you can end the session, or switch the monitor again, at any point.
 
 A restart waits for the old Bigscreen process to be completely gone before starting the new one, and confirms the new one really started. Bigscreen refuses to run twice, so starting it a moment too early does nothing at all — and leaves the session with no app. Bigscreen's log is copied to `logsigscreen-<time>-before-restart.txt` first, because each launch overwrites it.
 
@@ -322,7 +326,7 @@ powershell -ExecutionPolicy Bypass -File diagnostics\session-telemetry.ps1 -App 
 - One virtual display is assumed. With several monitors, the one that was primary when the session started is the one the desktop is handed back to; any other attached monitor is used as a fallback.
 - Recommendations are rules of thumb from testing, and the encoder width limit is general to current GPUs rather than read from yours; the headroom check measures your system, and should win where they disagree.
 - Closing the window with **X** is survivable but not the intended way out — use **R**. The guardian takes over: it shuts Bigscreen down properly (stream torn down first, as R does), waits for a monitor, hands the desktop back and parks the virtual display. It cannot run the shutdown report or the GPU-reset check, so R still tells you more.
-- Each display change costs a Bigscreen restart, so the headset picture drops for a few seconds while it reconnects.
+- Each display change costs a Bigscreen restart, so the headset picture drops while it reconnects - about 16 seconds on the test system, most of it the headset's own reconnect.
 - The debugger is reachable by other programs on the same PC while a session runs (never from the network).
 
 ---

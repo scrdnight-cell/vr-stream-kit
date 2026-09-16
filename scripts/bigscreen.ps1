@@ -4,6 +4,7 @@
 #   Find-BigscreenApp          newest installed app-x.y.z folder, its exe and log
 #   Get-BigscreenMonitors      which displays it built a capture for, from its log
 #   Test-CaptureMatchesDisplays   is that still the set of displays attached?
+#   Set-StreamProfileWhenReady apply height / bitrate / fps as soon as it takes
 #   Start-BigscreenApp         start it, and confirm it really started
 #   Stop-BigscreenApp          close it, and wait until the process is gone
 #   Wait-ForHeadsetConnecting  wait for the headset, fixing the capture if it is wrong
@@ -59,11 +60,19 @@ function Get-BigscreenMonitors($App) {
     if (-not $lines.Count) { return @() }
     $start = 0      # only the newest launch: the log is rewritten each time
     for ($i = $lines.Count - 1; $i -ge 0; $i--) { if ($lines[$i] -match 'Initiating BigSoup') { $start = $i; break } }
-    $found = @()
+    $found = @(); $last = -1
     for ($i = $start; $i -lt $lines.Count; $i++) {
         # e.g. "    Found monitor: \\.\DISPLAY5."  - take the token, drop the full stop.
-        if ($lines[$i] -match 'Found monitor:\s*(\S+)') { $found += ($matches[1].TrimEnd('.')) }
+        if ($lines[$i] -match 'Found monitor:\s*(\S+)') { $found += ($matches[1].TrimEnd('.')); $last = $i }
     }
+    # Only a finished list counts. Read mid-launch, the log can hold the first
+    # monitor but not yet the second, which would look like a mismatch and restart
+    # a perfectly good capture. Enumeration is over once Bigscreen moves on.
+    $done = $false
+    for ($i = $last + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match 'Skipping non-primary|Initializing desktop|Initiating remote desktop') { $done = $true; break }
+    }
+    if (-not $done) { return @() }
     return $found
 }
 
@@ -148,23 +157,54 @@ function Set-StreamProfile([int]$Height, [double]$Mbps, [int]$Fps) {
     return (& node (Join-Path $PSScriptRoot 'bigscreen-quality.js') $Height $Mbps $Fps 2>&1 | Out-String).Trim()
 }
 
+function Set-StreamProfileWhenReady([int]$Height, [double]$Mbps, [int]$Fps, [int]$MaxSeconds = 12) {
+    <# Apply the profile as soon as the new connection accepts it.
+
+       This used to wait a fixed 5 s after the headset connected - a guess, never
+       measured. Now it tries after 1 s and retries every 2 s until Bigscreen says
+       "applied", so a quick connection is tuned quickly and a slow one still is. #>
+    if ($Height -le 0) { return 'stock profile - nothing to apply' }
+    $deadline = (Get-Date).AddSeconds($MaxSeconds)
+    Start-Sleep -Seconds 1
+    while ($true) {
+        $out = Set-StreamProfile $Height $Mbps $Fps
+        if ($out -match ':\s*applied') { return $out }
+        if ((Get-Date).AddSeconds(2) -gt $deadline) { return "$out (not applied after $MaxSeconds s)" }
+        Start-Sleep -Seconds 2
+    }
+}
+
 function Set-PrimaryForDisplays([string]$VirtualAdapter = 'Virtual Display Driver', [string]$OnMonitorReturn = 'monitor') {
     <# Point the desktop at whatever should be primary for the displays attached
        right now: the monitor if one is there and the user wants it, otherwise the
        virtual display. #>
-    $displays = @(Get-AttachedDisplays $VirtualAdapter)
-    $physical = @($displays | Where-Object { -not $_.Virtual })
-    if ($physical.Count -gt 0 -and $OnMonitorReturn -eq 'monitor') {
-        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'prefer-virtual.ps1') -Restore -VirtualAdapter $VirtualAdapter 2>&1
-    } else {
-        $c = Connect-VirtualDisplay $VirtualAdapter
-        if (-not $c.ok -and -not ($displays | Where-Object Virtual)) {
-            Write-KitLog "  virtual display unavailable: $($c.why)"
-            return [pscustomobject]@{ Ok = $false; Primary = $null }
+    # Decided from what is attached NOW, and decided again if that changes part-way:
+    # a monitor switched off in the middle of being made primary is a new
+    # situation, not a failure to keep retrying.
+    for ($round = 1; $round -le 3; $round++) {
+        $displays = @(Get-AttachedDisplays $VirtualAdapter)
+        $physical = @($displays | Where-Object { -not $_.Virtual })
+        if ($physical.Count -gt 0 -and $OnMonitorReturn -eq 'monitor') {
+            $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'prefer-virtual.ps1') -Restore -VirtualAdapter $VirtualAdapter 2>&1
+        } else {
+            $c = Connect-VirtualDisplay $VirtualAdapter
+            if (-not $c.ok -and -not ($displays | Where-Object Virtual)) {
+                Write-KitLog "  virtual display unavailable: $($c.why)"
+                return [pscustomobject]@{ Ok = $false; Primary = $null }
+            }
+            $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'prefer-virtual.ps1') -VirtualAdapter $VirtualAdapter 2>&1
         }
-        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'prefer-virtual.ps1') -VirtualAdapter $VirtualAdapter 2>&1
+        $code = $LASTEXITCODE
+        Write-KitLog ('  ' + (($out | Select-Object -Last 1) -replace '^\s+', ''))
+        $before = ($displays | ForEach-Object Name | Sort-Object) -join '|'
+        $after  = (Get-AttachedDisplays $VirtualAdapter | ForEach-Object Name | Sort-Object) -join '|'
+        if ($code -eq 0 -and $before -eq $after) { break }
+        if ($code -eq 2 -or $before -ne $after) {
+            Write-KitLog '  The displays changed during the switch - deciding again from what is attached now.'
+            continue
+        }
+        break      # a genuine refusal: carry on - the capture check reconciles afterwards
     }
-    Write-KitLog ('  ' + (($out | Select-Object -Last 1) -replace '^\s+', ''))
     return [pscustomobject]@{ Ok = $true; Primary = (Get-CcdSources | Where-Object Primary | Select-Object -First 1).Name }
 }
 
@@ -201,8 +241,7 @@ function Restart-BigscreenFollowingDisplays {
         Start-Sleep -Seconds 2
         $f = Get-Item $App.Log -EA SilentlyContinue
         if ($f -and $f.LastWriteTime -gt $started -and (Select-String -Path $App.Log -Pattern 'DTLS connected' -Quiet)) {
-            Start-Sleep -Seconds 5
-            Write-KitLog ('  ' + (Set-StreamProfile $Height $Mbps $Fps))
+            Write-KitLog ('  ' + (Set-StreamProfileWhenReady $Height $Mbps $Fps))
             return [pscustomobject]@{ Ok = $true; Primary = $aim.Primary }
         }
         if (-not (Get-Process BigscreenRemoteDesktop -EA SilentlyContinue)) {
@@ -226,12 +265,12 @@ function Wait-ForHeadsetConnecting {
         [int]$Height, [double]$Mbps, [int]$Fps,
         [string]$VirtualAdapter = 'Virtual Display Driver',
         [string]$OnMonitorReturn = 'monitor',
-        [int]$SettleSeconds = 2
+        [int]$SettleSeconds = 1
     )
     $since = Get-Date
     $mismatchSince = $null
     while ($true) {
-        Start-Sleep -Seconds 2
+        Start-Sleep -Seconds 1
         $connected = $false
         $f = Get-Item $App.Log -EA SilentlyContinue
         if ($f -and $f.LastWriteTime -gt $since -and (Select-String -Path $App.Log -Pattern 'DTLS connected' -Quiet)) { $connected = $true }

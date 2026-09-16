@@ -40,7 +40,12 @@ param(
 #   SettleSeconds    the mismatch has to still be true this long (displays settle)
 #   CooldownSeconds  no second restart until this long after the last one
 #   MaxRestarts      after this many, stop restarting and say so
-$SettleSeconds   = 2
+#
+# NEVER BLIND. A restart returns as soon as Bigscreen is back up; waiting for the
+# headset happens here, in this loop, like any other reconnect. So R, the display
+# check and the headset timeout all keep working while a restart settles - before,
+# a restart waited up to 2 minutes for the headset and ignored everything else.
+$SettleSeconds   = 1
 $CooldownSeconds = 15
 $MaxRestarts     = 6
 
@@ -64,6 +69,7 @@ $downSince = $null
 $reason = $null
 
 $mismatchSince = $null     # when the capture first stopped matching the displays
+$awaitingSince = $null     # a restart is waiting for the headset; when it was detected
 $lastRestart   = [datetime]::MinValue
 $restarts      = 0
 $capped        = $false
@@ -75,7 +81,7 @@ if ($m0.Known -and -not $m0.Match) { Say "Bigscreen is capturing $($m0.Captured 
 elseif ($m0.Known) { Say "Capturing $($m0.Captured -join ', ')." }
 
 while (-not $reason) {
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     try {
         if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq 'R') { $reason = 'R pressed'; break }
     } catch { }
@@ -87,6 +93,7 @@ while (-not $reason) {
     if ($m.Known -and -not $m.Match) {
         if (-not $mismatchSince) { $mismatchSince = Get-Date }
         elseif (((Get-Date) - $mismatchSince).TotalSeconds -ge $SettleSeconds) {
+            $detectedAt = $mismatchSince
             $mismatchSince = $null
             $physical = @(Get-AttachedDisplays $VirtualAdapter | Where-Object { -not $_.Virtual })
             $what = if ($physical.Count) { 'A monitor is back' } else { 'The monitor is gone' }
@@ -109,13 +116,18 @@ while (-not $reason) {
                     if ($kept) { Say "  kept Bigscreen's log as $(Split-Path $kept -Leaf)" }
                     $downSince = $null                     # a deliberate restart is not a lost headset
                     $r = Restart-BigscreenFollowingDisplays -App $app -Height $Height -Mbps $Mbps -Fps $Fps `
-                            -VirtualAdapter $VirtualAdapter -OnMonitorReturn $OnMonitorReturn
+                            -VirtualAdapter $VirtualAdapter -OnMonitorReturn $OnMonitorReturn -SkipHeadsetWait
                     $lastRestart = Get-Date
-                    $downSince = $null
-                    $seen = @(Get-Content $app.Log -EA SilentlyContinue).Count   # fresh log, fresh start
-                    $after = Test-CaptureMatchesDisplays $app $VirtualAdapter
-                    if ($r.Ok) { Say "Streaming again, primary is $($r.Primary), capturing $($after.Captured -join ', ')." }
-                    else { Say 'The stream did not come back. Press R to end the session, or connect from the headset again.' }
+                    $seen = 0                               # the new launch's log, from its first line
+                    if ($r.Ok) {
+                        # The headset reconnect is handled below, like any reconnect. If it
+                        # never comes back, the usual timeout ends the session.
+                        $awaitingSince = $detectedAt
+                        $downSince = Get-Date
+                        Say "Bigscreen is back up (primary $($r.Primary)) - waiting for the headset. R still works."
+                    } else {
+                        Say 'Bigscreen did not come back up. Press R to end the session.'
+                    }
                     continue
                 }
             }
@@ -138,9 +150,13 @@ while (-not $reason) {
         }
         elseif ($l -like '*DTLS connected*') {
             $downSince = $null
-            Say "Headset connected - applying $Height lines, $Mbps Mbps, $Fps fps in 5 s."
-            Start-Sleep -Seconds 5
-            Say "  $(Set-StreamProfile $Height $Mbps $Fps)"
+            Say "Headset connected - applying $Height lines, $Mbps Mbps, $Fps fps."
+            Say "  $(Set-StreamProfileWhenReady $Height $Mbps $Fps)"
+        }
+        if ($l -like '*DTLS connected*' -and $awaitingSince) {
+            # Measured, so a change in restart speed shows up in the log, not just in a claim.
+            Say ("Streaming again - {0:N0} s from the display change being detected." -f ((Get-Date) - $awaitingSince).TotalSeconds)
+            $awaitingSince = $null
         }
     }
     if ($downSince -and ((Get-Date) - $downSince).TotalSeconds -ge $GraceSeconds) { $reason = "the headset has been gone for $GraceSeconds s" }
@@ -178,7 +194,7 @@ if ($LASTEXITCODE -eq 0) {
     # watching for it, and will hand the display back and park the virtual
     # display as soon as it appears - so the flag stays, and so does it.
     $display = 'monitor is off - it will be made primary when you switch it on'
-    if (-not $KeepVirtualDisplay) { $display += ', and the virtual display parked' }
+    if (-not $KeepVirtualDisplay) { $display += ', and the virtual display will be parked then' }
     Say 'Monitor not attached - left with the guardian, which is waiting for it.'
 }
 

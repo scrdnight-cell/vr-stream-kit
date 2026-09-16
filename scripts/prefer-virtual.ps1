@@ -45,10 +45,25 @@ if (-not $virtual) {
 
 $target = if ($Restore) { $physical } else { $virtual }
 for ($try = 1; $try -le 3; $try++) {
+    # A monitor switched off mid-switch is gone, not stubborn: retrying it only
+    # costs time. Exit 2 tells the caller to re-decide from what is attached now.
+    if (-not (Get-AttachedDisplays $VirtualAdapter | Where-Object Name -eq $target)) {
+        "  $target is no longer attached."; exit 2
+    }
     $r = Set-PrimaryByCcd $target
     if (-not $r.ok) { "  attempt $try refused: $($r.why)" }
-    Start-Sleep -Seconds 2
-    $now = (Get-CcdSources | Where-Object Primary | Select-Object -First 1).Name
+    # Read back until it holds, rather than always waiting the full 2 s. It must
+    # still be primary on a second look: a switch can be undone a moment later.
+    $now = $null
+    for ($t = 0; $t -lt 8; $t++) {
+        Start-Sleep -Milliseconds 250
+        $now = (Get-CcdSources | Where-Object Primary | Select-Object -First 1).Name
+        if ($now -eq $target) {
+            Start-Sleep -Milliseconds 500
+            $now = (Get-CcdSources | Where-Object Primary | Select-Object -First 1).Name
+            break
+        }
+    }
     if ($now -eq $target) { "  primary -> $target  (confirmed)"; exit 0 }
     "  attempt $try did not hold - primary is still $now"
 }

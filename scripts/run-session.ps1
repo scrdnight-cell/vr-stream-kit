@@ -118,9 +118,8 @@ if (-not (Wait-ForHeadsetConnecting -App $app -Height $Height -Mbps $Mbps -Fps $
 
 # --- 6. apply the profile -----------------------------------------------------------------
 if ($Height -gt 0) {
-    '  [5/5] Headset connected. Applying the profile in 5 seconds...'
-    Start-Sleep -Seconds 5
-    '  ' + (Set-StreamProfile $Height $Mbps $Fps)
+    '  [5/5] Headset connected. Applying the profile...'
+    '  ' + (Set-StreamProfileWhenReady $Height $Mbps $Fps)
 } else {
     '  [5/5] Headset connected. Stock profile: leaving Bigscreen''s own settings.'
 }
