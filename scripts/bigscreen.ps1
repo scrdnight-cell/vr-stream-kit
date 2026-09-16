@@ -118,6 +118,15 @@ function Start-BigscreenApp($App, [int]$TimeoutSeconds = 20) {
     # Node with no script: it exits at once with code 0, writes nothing and shows
     # nothing. Cleared here so the kit works wherever it is launched from.
     Remove-Item Env:ELECTRON_RUN_AS_NODE -EA SilentlyContinue
+    #
+    # ELECTRON_NO_ATTACH_CONSOLE. Left to itself, Bigscreen attaches to the kit's
+    # console window to print its chatter there - and then dies with it. Closing the
+    # window with X crashed Bigscreen in testing (an Application Error record), live
+    # encoder and all, before anything could shut it down properly. Detached, it
+    # outlives the window, and the guardian closes it the safe way: stream torn down
+    # through the debugger first, exactly as R does. Its own log, out.txt - the one
+    # the kit reads - is unaffected.
+    $env:ELECTRON_NO_ATTACH_CONSOLE = '1'
     $before = @(Get-Content $App.Log -EA SilentlyContinue).Count
     Start-Process -FilePath $App.Exe -WorkingDirectory $App.Dir -ArgumentList '--inspect=127.0.0.1:9229'
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)

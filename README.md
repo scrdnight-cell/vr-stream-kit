@@ -321,7 +321,7 @@ powershell -ExecutionPolicy Bypass -File diagnostics\session-telemetry.ps1 -App 
 - Relies on the Bigscreen Remote Desktop PC app exposing its stream settings to its debugger. A future Bigscreen release could remove that; the kit reports `NOT FOUND` if so.
 - One virtual display is assumed. With several monitors, the one that was primary when the session started is the one the desktop is handed back to; any other attached monitor is used as a fallback.
 - Recommendations are rules of thumb from testing, and the encoder width limit is general to current GPUs rather than read from yours; the headroom check measures your system, and should win where they disagree.
-- Closing the window with **X** skips the safe shutdown — use **R**. The guardian still hands the display back, but Bigscreen is closed less gently.
+- Closing the window with **X** is survivable but not the intended way out — use **R**. The guardian takes over: it shuts Bigscreen down properly (stream torn down first, as R does), waits for a monitor, hands the desktop back and parks the virtual display. It cannot run the shutdown report or the GPU-reset check, so R still tells you more.
 - Each display change costs a Bigscreen restart, so the headset picture drops for a few seconds while it reconnects.
 - The debugger is reachable by other programs on the same PC while a session runs (never from the network).
 
